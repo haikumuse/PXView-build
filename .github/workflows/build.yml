@@ -58,6 +58,7 @@ jobs:
             libxcb-render0 libxcb-render-util0 libxcb-randr0 libxcb-shape0 \
             libxcb-shm0 libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0 \
             libxcb-xinput0 libxcb-xkb1 libxcb-util1 \
+            libwayland-dev libwayland-egl1 libwayland-client0 libwayland-cursor0 \
             libzip-dev nettle-dev libftdi1-dev \
             sdcc wget
 
@@ -69,8 +70,10 @@ jobs:
       - name: Install Qt via aqtinstall
         run: |
           pip3 install aqtinstall
+          # qtwayland must be installed explicitly so AppImage bundles wayland plugin
+          # Without it, AppImage only has xcb plugin and fails on Wayland systems.
           aqt install-qt linux desktop ${{ env.QT_VERSION }} linux_gcc_64 \
-            -m qtwebsockets --outputdir ${{ env.QT_PREFIX }}
+            -m qtwebsockets qtwayland --outputdir ${{ env.QT_PREFIX }}
 
       - name: Build fx2lafw firmware
         run: |
