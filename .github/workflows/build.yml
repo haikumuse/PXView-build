@@ -81,7 +81,8 @@ jobs:
             -DCMAKE_PREFIX_PATH="${{ env.QT_PREFIX }}/${{ env.QT_VERSION }}/gcc_64"
 
       - name: Build and Install Web UI (optional)
-        run: cd build && ninja install-webui || echo "WARNING: Web UI skipped"
+        run: |
+          cd build && ninja install-webui || echo "WARNING: Web UI skipped"
 
       - name: Build PXView
         run: cd build && ninja -j $(nproc)
