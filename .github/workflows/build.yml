@@ -70,10 +70,13 @@ jobs:
       - name: Install Qt via aqtinstall
         run: |
           pip3 install aqtinstall
-          # qtwayland must be installed explicitly so AppImage bundles wayland plugin
-          # Without it, AppImage only has xcb plugin and fails on Wayland systems.
+          # qtwebsockets: needed by CMake deps.cmake find_package(Qt6 COMPONENTS WebSockets)
+          # Note: qtwayland module not available via aqtinstall for this Qt version;
+          # if Wayland support is needed, set QT_QPA_PLATFORM=xcb when running the AppImage.
           aqt install-qt linux desktop ${{ env.QT_VERSION }} linux_gcc_64 \
-            -m qtwebsockets qtwayland --outputdir ${{ env.QT_PREFIX }}
+            -m qtwebsockets --outputdir ${{ env.QT_PREFIX }}
+          # List platform plugins for debugging
+          ls -la ${{ env.QT_PREFIX }}/${{ env.QT_VERSION }}/gcc_64/plugins/platforms/ || true
 
       - name: Build fx2lafw firmware
         run: |
