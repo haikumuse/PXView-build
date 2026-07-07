@@ -70,13 +70,27 @@ jobs:
       - name: Install Qt via aqtinstall
         run: |
           pip3 install aqtinstall
-          # qtwebsockets: needed by CMake deps.cmake find_package(Qt6 COMPONENTS WebSockets)
-          # Note: qtwayland module not available via aqtinstall for this Qt version;
-          # if Wayland support is needed, set QT_QPA_PLATFORM=xcb when running the AppImage.
           aqt install-qt linux desktop ${{ env.QT_VERSION }} linux_gcc_64 \
             -m qtwebsockets --outputdir ${{ env.QT_PREFIX }}
-          # List platform plugins for debugging
+          echo "=== Platform plugins before qtwayland build ==="
           ls -la ${{ env.QT_PREFIX }}/${{ env.QT_VERSION }}/gcc_64/plugins/platforms/ || true
+
+      - name: Build qtwayland platform plugin
+        run: |
+          # aqtinstall does not provide the qtwayland client platform plugin.
+          # Build it from source against the aqtinstalled Qt so the AppImage
+          # bundles both xcb and wayland platform plugins.
+          sudo apt-get install -y wayland-protocols libwayland-dev
+          git clone --branch v${{ env.QT_VERSION }} --depth 1 https://github.com/qt/qtwayland.git
+          cd qtwayland
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="${{ env.QT_PREFIX }}/${{ env.QT_VERSION }}/gcc_64" \
+            -DCMAKE_INSTALL_PREFIX="${{ env.QT_PREFIX }}/${{ env.QT_VERSION }}/gcc_64"
+          cmake --build build --parallel $(nproc)
+          cmake --install build
+          echo "=== Platform plugins after qtwayland build ==="
+          ls -la ${{ env.QT_PREFIX }}/${{ env.QT_VERSION }}/gcc_64/plugins/platforms/
 
       - name: Build fx2lafw firmware
         run: |
