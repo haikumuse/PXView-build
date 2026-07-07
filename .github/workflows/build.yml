@@ -1,0 +1,189 @@
+name: PXView Cross-Repo Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch/tag/SHA to build (e.g. view_and_data, main, abc123)'
+        required: true
+        default: 'view_and_data'
+      targets:
+        description: 'Which platforms to build (linux / mac / both)'
+        required: true
+        default: 'both'
+        type: choice
+        options: [linux, mac, both]
+  repository_dispatch:
+    types: [build]
+
+jobs:
+  linux:
+    name: Linux AppImage (x86_64)
+    if: ${{ github.event.inputs.targets == 'linux' || github.event.inputs.targets == 'both' || github.event.action == 'build' }}
+    runs-on: ubuntu-22.04
+    env:
+      QT_PREFIX: ${{ github.workspace }}/Qt
+      QT_VERSION: "6.11.0"
+      LINUXDEPLOY_VERSION: "continuous"
+
+    steps:
+      - name: Resolve ref
+        id: ref
+        run: |
+          if [ -n "${{ github.event.inputs.ref }}" ]; then
+            echo "value=${{ github.event.inputs.ref }}" >> $GITHUB_OUTPUT
+          else
+            echo "value=${{ github.event.client_payload.ref }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout private PXView repo
+        uses: actions/checkout@v4
+        with:
+          repository: haikumuse/PXView
+          ref: ${{ steps.ref.outputs.value }}
+          token: ${{ secrets.PXVIEW_PAT }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git gcc g++ make cmake ninja-build pkg-config \
+            libglib2.0-dev zlib1g-dev libusb-1.0-0-dev libudev-dev \
+            libboost-dev libfftw3-dev libssl-dev \
+            python3-dev python3-pip \
+            libgl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-0 libvulkan-dev \
+            libzip-dev nettle-dev libftdi1-dev \
+            sdcc wget
+
+      - name: Setup Node.js (for Web UI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install Qt via aqtinstall
+        run: |
+          pip3 install aqtinstall
+          aqt install-qt linux desktop ${{ env.QT_VERSION }} linux_gcc_64 \
+            -m qtwebsockets --outputdir ${{ env.QT_PREFIX }}
+
+      - name: Build fx2lafw firmware
+        run: |
+          bash build_fx2lafw.sh || echo "WARNING: fx2lafw firmware build failed"
+
+      - name: Configure CMake
+        run: |
+          rm -rf build && mkdir -p build && cd build
+          cmake .. -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=../install.dir \
+            -DCMAKE_PREFIX_PATH="${{ env.QT_PREFIX }}/${{ env.QT_VERSION }}/gcc_64"
+
+      - name: Build and Install Web UI (optional)
+        run: cd build && ninja install-webui || echo "WARNING: Web UI skipped"
+
+      - name: Build PXView
+        run: cd build && ninja -j $(nproc)
+
+      - name: Install
+        run: cd build && ninja install
+
+      - name: Create AppImage using linuxdeploy
+        run: |
+          wget -c "https://github.com/linuxdeploy/linuxdeploy/releases/download/${{ env.LINUXDEPLOY_VERSION }}/linuxdeploy-x86_64.AppImage"
+          wget -c "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/${{ env.LINUXDEPLOY_VERSION }}/linuxdeploy-plugin-qt-x86_64.AppImage"
+          chmod +x linuxdeploy*.AppImage
+          export QMAKE="${{ env.QT_PREFIX }}/${{ env.QT_VERSION }}/gcc_64/bin/qmake"
+          export LD_LIBRARY_PATH="${{ env.QT_PREFIX }}/${{ env.QT_VERSION }}/gcc_64/lib:$LD_LIBRARY_PATH"
+          export OUTPUT="PXView-x86_64.AppImage"
+          ./linuxdeploy-x86_64.AppImage \
+            --appdir install.dir \
+            -e install.dir/bin/PXView \
+            -d install.dir/share/applications/pxview.desktop \
+            --plugin qt \
+            --output appimage
+
+      - name: Verify AppImage
+        run: |
+          ls -la PXView-x86_64.AppImage
+          chmod +x PXView-x86_64.AppImage
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PXView-Linux-x86_64-AppImage-${{ steps.ref.outputs.value }}
+          path: PXView-x86_64.AppImage
+          if-no-files-found: error
+
+  mac:
+    name: macOS DMG (ARM64)
+    if: ${{ github.event.inputs.targets == 'mac' || github.event.inputs.targets == 'both' || github.event.action == 'build' }}
+    runs-on: macos-latest
+    steps:
+      - name: Resolve ref
+        id: ref
+        run: |
+          if [ -n "${{ github.event.inputs.ref }}" ]; then
+            echo "value=${{ github.event.inputs.ref }}" >> $GITHUB_OUTPUT
+          else
+            echo "value=${{ github.event.client_payload.ref }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout private PXView repo
+        uses: actions/checkout@v4
+        with:
+          repository: haikumuse/PXView
+          ref: ${{ steps.ref.outputs.value }}
+          token: ${{ secrets.PXVIEW_PAT }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install dependencies via Homebrew
+        run: |
+          brew update
+          brew install cmake ninja gettext glib libusb zlib boost fftw python3 qt pkg-config libzip nettle libftdi
+
+      - name: Setup Node.js (for Web UI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Configure CMake
+        run: |
+          rm -rf build && mkdir -p build && cd build
+          export LDFLAGS="-L$(brew --prefix gettext)/lib"
+          export CPPFLAGS="-I$(brew --prefix gettext)/include"
+          export PKG_CONFIG_PATH="$(brew --prefix gettext)/lib/pkgconfig:$PKG_CONFIG_PATH"
+          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix qt)" \
+            -DCMAKE_INSTALL_PREFIX=../install.dir
+
+      - name: Build and Package Web UI
+        run: cd build && ninja && ninja install-webui
+
+      - name: Install
+        run: cd build && ninja install
+
+      - name: Create DMG using macdeployqt
+        run: |
+          MACDEPLOYQT="$(brew --prefix qt)/bin/macdeployqt"
+          PY_PREFIX="$(brew --prefix python@3.14)"
+          mkdir -p "$PY_PREFIX/lib"
+          if [ ! -e "$PY_PREFIX/lib/Python.framework" ] && [ -e "$PY_PREFIX/Frameworks/Python.framework" ]; then
+            ln -s "$PY_PREFIX/Frameworks/Python.framework" "$PY_PREFIX/lib/Python.framework"
+          fi
+          $MACDEPLOYQT install.dir/PXView.app -dmg \
+            -codesign=- -always-overwrite -verbose=1 || true
+          if [ ! -f install.dir/PXView.dmg ]; then
+            hdiutil create -volname PXView -srcfolder install.dir/PXView.app \
+              -ov -format UDZO install.dir/PXView.dmg
+          fi
+          ls -la install.dir/*.dmg
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PXView-macOS-ARM64-${{ steps.ref.outputs.value }}
+          path: install.dir/*.dmg
+          if-no-files-found: error
