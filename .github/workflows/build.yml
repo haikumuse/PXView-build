@@ -79,9 +79,11 @@ jobs:
       - name: Configure CMake
         run: |
           rm -rf build && mkdir -p build && cd build
+          # linuxdeploy expects AppDir to contain usr/{bin,share,lib}.
+          # Install to install.dir/usr so paths align with linuxdeploy's --appdir.
           cmake .. -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=../install.dir \
+            -DCMAKE_INSTALL_PREFIX=../install.dir/usr \
             -DCMAKE_PREFIX_PATH="${{ env.QT_PREFIX }}/${{ env.QT_VERSION }}/gcc_64"
 
       - name: Build and Install Web UI (optional)
@@ -104,8 +106,8 @@ jobs:
           export OUTPUT="PXView-x86_64.AppImage"
           ./linuxdeploy-x86_64.AppImage \
             --appdir install.dir \
-            -e install.dir/bin/PXView \
-            -d install.dir/share/applications/pxview.desktop \
+            -e install.dir/usr/bin/PXView \
+            -d install.dir/usr/share/applications/pxview.desktop \
             --plugin qt \
             --output appimage
 
