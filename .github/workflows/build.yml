@@ -80,13 +80,17 @@ jobs:
           # aqtinstall does not provide the qtwayland client platform plugin.
           # Build it from source against the aqtinstalled Qt so the AppImage
           # bundles both xcb and wayland platform plugins.
+          # Only build the client side — the compositor (server) needs libdrm
+          # and we don't need it (PXView is a client app, not a compositor).
           sudo apt-get install -y wayland-protocols libwayland-dev
           git clone --branch v${{ env.QT_VERSION }} --depth 1 https://github.com/qt/qtwayland.git
           cd qtwayland
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="${{ env.QT_PREFIX }}/${{ env.QT_VERSION }}/gcc_64" \
-            -DCMAKE_INSTALL_PREFIX="${{ env.QT_PREFIX }}/${{ env.QT_VERSION }}/gcc_64"
+            -DCMAKE_INSTALL_PREFIX="${{ env.QT_PREFIX }}/${{ env.QT_VERSION }}/gcc_64" \
+            -DQT_FEATURE_wayland_server=OFF \
+            -DQT_FEATURE_wayland_client=ON
           cmake --build build --parallel $(nproc)
           cmake --install build
           echo "=== Platform plugins after qtwayland build ==="
