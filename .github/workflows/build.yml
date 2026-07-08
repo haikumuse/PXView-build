@@ -136,11 +136,78 @@ jobs:
           ls -la PXView-x86_64.AppImage
           chmod +x PXView-x86_64.AppImage
 
-      - name: Upload Artifact
+      - name: Package udev rules (separate artifact)
+        run: |
+          # udev rules must be installed to system path, not inside AppImage.
+          # Package them separately with an install script.
+          # Includes:
+          #   - 60-px.rules: PXView-specific rules (PXLogic/Qinheng/Van Ooijen VID)
+          #   - 60-libsigrok.rules: marks all libsigrok-supported USB devices with ID_SIGROK=1
+          #   - 61-libsigrok-plugdev.rules: grants plugdev group access (Debian-based)
+          #   - 61-libsigrok-uaccess.rules: grants local logged-in user access (systemd-logind)
+          mkdir -p udev-rules
+          cp install.dir/usr/lib/udev/rules.d/60-px.rules udev-rules/
+          cp libsigrok/contrib/60-libsigrok.rules udev-rules/
+          cp libsigrok/contrib/61-libsigrok-plugdev.rules udev-rules/
+          cp libsigrok/contrib/61-libsigrok-uaccess.rules udev-rules/
+          cat > udev-rules/install-udev-rules.sh << 'EOF'
+          #!/bin/bash
+          # Install udev rules for PXView hardware access (non-root USB permission)
+          # Covers PXView devices (PXLogic, Qinheng, etc.) and all libsigrok-supported devices.
+          # Usage: sudo ./install-udev-rules.sh
+          set -e
+          RULES_FILES="60-px.rules 60-libsigrok.rules 61-libsigrok-plugdev.rules 61-libsigrok-uaccess.rules"
+          if [ "$(id -u)" -ne 0 ]; then
+            echo "Please run with sudo: sudo $0"
+            exit 1
+          fi
+          # Find system udev rules directory
+          if [ -d /usr/lib/udev/rules.d ]; then
+            DEST=/usr/lib/udev/rules.d
+          elif [ -d /lib/udev/rules.d ]; then
+            DEST=/lib/udev/rules.d
+          elif [ -d /etc/udev/rules.d ]; then
+            DEST=/etc/udev/rules.d
+          else
+            echo "Error: No udev rules directory found"
+            exit 1
+          fi
+          echo "Installing udev rules to $DEST/"
+          for f in $RULES_FILES; do
+            if [ ! -f "$f" ]; then
+              echo "Warning: $f not found, skipping"
+              continue
+            fi
+            cp "$f" "$DEST/$f"
+            echo "  -> installed $f"
+          done
+          udevadm control --reload-rules
+          udevadm trigger
+          echo ""
+          echo "Done. PXView hardware devices should now be accessible without sudo."
+          echo "Note: For the 'plugdev' group rule to take effect, add yourself to the group:"
+          echo "  sudo usermod -aG plugdev \$USER"
+          echo "Then log out and back in (or run 'newgrp plugdev')."
+          EOF
+          chmod +x udev-rules/install-udev-rules.sh
+          # Create tarball
+          tar -czf PXView-udev-rules.tar.gz -C udev-rules .
+          ls -la PXView-udev-rules.tar.gz
+          echo "=== udev rules contents ==="
+          tar -tzf PXView-udev-rules.tar.gz
+
+      - name: Upload AppImage Artifact
         uses: actions/upload-artifact@v4
         with:
           name: PXView-Linux-x86_64-AppImage-${{ steps.ref.outputs.value }}
           path: PXView-x86_64.AppImage
+          if-no-files-found: error
+
+      - name: Upload udev rules Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PXView-Linux-udev-rules-${{ steps.ref.outputs.value }}
+          path: PXView-udev-rules.tar.gz
           if-no-files-found: error
 
   mac:
