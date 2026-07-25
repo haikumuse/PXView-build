@@ -303,23 +303,14 @@ jobs:
           # 清除 Homebrew/缓存下载的库可能带的隔离标记
           xattr -cr install.dir/PXView.app
 
-          # 逐个签名所有 Mach-O 二进制（用 file 按 magic 识别，比 *.dylib 全）
-          # 不再用 2>/dev/null || true 吞掉错误 —— 签名失败必须报错
-          find install.dir/PXView.app -type f -print0 | while IFS= read -r -d '' f; do
-            if file "$f" 2>/dev/null | grep -q "Mach-O"; then
-              chmod u+w "$f" 2>/dev/null || true
-              if ! codesign --force --sign - "$f" 2>&1; then
-                echo "ERROR: Failed to sign $f"
-                codesign -dvvv "$f" 2>&1 || true
-                file "$f"
-                otool -L "$f" 2>/dev/null | head -10
-                exit 1
-              fi
-            fi
-          done
-
-          # 整体签名 .app（不用 --deep，已弃用；第 5 步已逐个签过子组件）
-          codesign --force --sign - install.dir/PXView.app
+          # 用 --deep 一次性递归签名整个 .app。
+          # 必须用 --deep：framework（如 Python.framework）的资源封印
+          # 必须由 framework 目录签名建立，单独签 framework 内二进制
+          # 会破坏资源封印 → "a sealed resource is missing or invalid"。
+          # --deep 虽被 Apple 标记 deprecated（对分发签名而言），
+          # 但对 CI 的 ad-hoc 签名是正确工具：它按从内到外顺序递归签名。
+          # --force 覆盖所有可能失效的旧签名。
+          codesign --force --deep --sign - install.dir/PXView.app
 
           # 验证签名，失败则构建失败并打印诊断信息
           if ! codesign --verify --deep --strict install.dir/PXView.app 2>&1; then
