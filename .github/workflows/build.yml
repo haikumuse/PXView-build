@@ -271,12 +271,26 @@ jobs:
           if [ ! -e "$PY_PREFIX/lib/Python.framework" ] && [ -e "$PY_PREFIX/Frameworks/Python.framework" ]; then
             ln -s "$PY_PREFIX/Frameworks/Python.framework" "$PY_PREFIX/lib/Python.framework"
           fi
-          $MACDEPLOYQT install.dir/PXView.app -dmg \
-            -codesign=- -always-overwrite -verbose=1 || true
-          if [ ! -f install.dir/PXView.dmg ]; then
-            hdiutil create -volname PXView -srcfolder install.dir/PXView.app \
-              -ov -format UDZO install.dir/PXView.dmg
-          fi
+          # macdeployqt 只做依赖收集，不传 -codesign=-。
+          # 旧版 -codesign=- 只签主二进制和 Qt 框架，但被复制进 Frameworks 的
+          # 非 Qt 传递依赖（libbrotlicommon/libsharpyuv/libwebp）未签名
+          # → codesign --verify 失败 → Gatekeeper 报"已损坏"。
+          # 签名由后续步骤显式控制，dmg 由最后 hdiutil 生成（保证签后内容一致）。
+          $MACDEPLOYQT install.dir/PXView.app \
+            -always-overwrite -verbose=1
+          # 逐个签名所有 Mach-O 二进制（叶子节点先签，再签父级 .app）
+          find install.dir/PXView.app -type f -print0 | while IFS= read -r -d '' f; do
+            if file "$f" 2>/dev/null | grep -q "Mach-O"; then
+              codesign --force --sign - "$f" 2>/dev/null || true
+            fi
+          done
+          # 整体深度签名 .app
+          codesign --force --deep --sign - install.dir/PXView.app
+          # 验证签名，失败则构建失败（不再用 || true 吞掉错误）
+          codesign --verify --deep --strict install.dir/PXView.app
+          # 签名完成后生成 dmg
+          hdiutil create -volname PXView -srcfolder install.dir/PXView.app \
+            -ov -format UDZO install.dir/PXView.dmg
           ls -la install.dir/*.dmg
 
       - name: Upload Artifact
