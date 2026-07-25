@@ -277,17 +277,61 @@ jobs:
           # → codesign --verify 失败 → Gatekeeper 报"已损坏"。
           # 签名由后续步骤显式控制，dmg 由最后 hdiutil 生成（保证签后内容一致）。
           $MACDEPLOYQT install.dir/PXView.app \
-            -always-overwrite -verbose=1
-          # 逐个签名所有 Mach-O 二进制（叶子节点先签，再签父级 .app）
-          find install.dir/PXView.app -type f -print0 | while IFS= read -r -d '' f; do
-            if file "$f" 2>/dev/null | grep -q "Mach-O"; then
-              codesign --force --sign - "$f" 2>/dev/null || true
+            -always-overwrite -verbose=1 \
+            || true   # macdeployqt 对找不到的 rpath 返回非零，但已复制大部分依赖
+
+          # 预先从 Homebrew 复制 macdeployqt 报错说找不到的三个 dylib
+          # （Qt WebEngine/Pdf 的传递依赖，PXView 没直接用，但 macdeployqt 会扫描到）
+          # 问题：macdeployqt 复制版本化 dylib 时可能只复制符号链接，
+          # 导致 install_name_tool 修改后签名失效。
+          # 解决：从 Homebrew lib 直接复制实际文件 + 建立正确的符号链接。
+          BREW_LIB="$(brew --prefix)/lib"
+          mkdir -p install.dir/PXView.app/Contents/Frameworks
+          for dep in libbrotlicommon.1.dylib libsharpyuv.0.dylib libwebp.7.dylib; do
+            real_path="$(readlink -f "$BREW_LIB/$dep" 2>/dev/null || echo "$BREW_LIB/$dep")"
+            if [ -f "$real_path" ]; then
+              real_name="$(basename "$real_path")"
+              cp -f "$real_path" install.dir/PXView.app/Contents/Frameworks/"$real_name"
+              if [ "$real_name" != "$dep" ]; then
+                rm -f install.dir/PXView.app/Contents/Frameworks/"$dep"
+                ln -s "$real_name" install.dir/PXView.app/Contents/Frameworks/"$dep"
+              fi
+              install_name_tool -id "@rpath/$dep" install.dir/PXView.app/Contents/Frameworks/"$real_name"
             fi
           done
-          # 整体深度签名 .app
-          codesign --force --deep --sign - install.dir/PXView.app
-          # 验证签名，失败则构建失败（不再用 || true 吞掉错误）
-          codesign --verify --deep --strict install.dir/PXView.app
+
+          # 清除 Homebrew/缓存下载的库可能带的隔离标记
+          xattr -cr install.dir/PXView.app
+
+          # 逐个签名所有 Mach-O 二进制（用 file 按 magic 识别，比 *.dylib 全）
+          # 不再用 2>/dev/null || true 吞掉错误 —— 签名失败必须报错
+          find install.dir/PXView.app -type f -print0 | while IFS= read -r -d '' f; do
+            if file "$f" 2>/dev/null | grep -q "Mach-O"; then
+              chmod u+w "$f" 2>/dev/null || true
+              if ! codesign --force --sign - "$f" 2>&1; then
+                echo "ERROR: Failed to sign $f"
+                codesign -dvvv "$f" 2>&1 || true
+                file "$f"
+                otool -L "$f" 2>/dev/null | head -10
+                exit 1
+              fi
+            fi
+          done
+
+          # 整体签名 .app（不用 --deep，已弃用；第 5 步已逐个签过子组件）
+          codesign --force --sign - install.dir/PXView.app
+
+          # 验证签名，失败则构建失败并打印诊断信息
+          if ! codesign --verify --deep --strict install.dir/PXView.app 2>&1; then
+            echo "ERROR: codesign verification failed"
+            echo "=== Diagnostic: libbrotlicommon.1.dylib ==="
+            ls -la install.dir/PXView.app/Contents/Frameworks/libbrotlicommon* 2>/dev/null || true
+            codesign -dvvv install.dir/PXView.app/Contents/Frameworks/libbrotlicommon.1.dylib 2>&1 || true
+            echo "=== All Frameworks ==="
+            ls -la install.dir/PXView.app/Contents/Frameworks/
+            exit 1
+          fi
+
           # 签名完成后生成 dmg
           hdiutil create -volname PXView -srcfolder install.dir/PXView.app \
             -ov -format UDZO install.dir/PXView.dmg
