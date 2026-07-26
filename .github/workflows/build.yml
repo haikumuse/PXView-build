@@ -240,12 +240,20 @@ jobs:
       - name: Install dependencies via Homebrew
         run: |
           brew update
-          brew install cmake ninja gettext glib libusb zlib boost fftw python3 qt pkg-config libzip nettle libftdi
+          # sdcc: 编译 fx2lafw 固件（Cypress FX2 USB 芯片，老款逻辑分析仪用）
+          brew install cmake ninja gettext glib libusb zlib boost fftw python3 qt pkg-config libzip nettle libftdi sdcc
 
       - name: Setup Node.js (for Web UI)
         uses: actions/setup-node@v4
         with:
           node-version: '24'
+
+      - name: Build fx2lafw firmware
+        run: |
+          # 编译 15 个 fx2lafw-*.fw 固件文件（Cypress FX2 USB 芯片）
+          # 不装 sdcc 的话 CMake 会在 install 阶段跳过这些固件，导致使用 FX2 芯片
+          # 的老款逻辑分析仪（Saleae Logic、Bitbang Cyclone 等）无法识别
+          bash build_fx2lafw.sh || echo "WARNING: fx2lafw firmware build failed"
 
       - name: Configure CMake
         run: |
