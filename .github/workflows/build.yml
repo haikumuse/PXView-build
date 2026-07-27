@@ -120,6 +120,32 @@ jobs:
       - name: Install
         run: cd build && ninja install
 
+      - name: Bundle Python standard library into AppDir
+        run: |
+          # libsigrokdecode 内嵌 Python 解释器,需要 Python 标准库(encodings 等模块)
+          # 否则用户系统若 Python 版本不匹配(如构建用 3.10, 用户是 3.12)
+          # 会出现 "ModuleNotFoundError: No module named 'encodings'" 启动失败
+          PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+          echo "Bundling Python $PY_VERSION standard library"
+          # 复制标准库 .py 文件
+          mkdir -p install.dir/usr/lib/python$PY_VERSION
+          cp -a /usr/lib/python$PY_VERSION/* install.dir/usr/lib/python$PY_VERSION/ 2>/dev/null || true
+          # 复制 lib-dynload(encodings 等内置模块的 .so 文件)
+          mkdir -p install.dir/usr/lib/python$PY_VERSION/lib-dynload
+          cp -a /usr/lib/python$PY_VERSION/lib-dynload/* install.dir/usr/lib/python$PY_VERSION/lib-dynload/ 2>/dev/null || true
+          # 删除不必要的测试和 __pycache__ 以减小体积
+          rm -rf install.dir/usr/lib/python$PY_VERSION/test
+          rm -rf install.dir/usr/lib/python$PY_VERSION/__pycache__
+          find install.dir/usr/lib/python$PY_VERSION -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+          # 同时打包 python3 目录(部分发行版 stdlib 在这里)
+          if [ -d /usr/lib/python$PY_VERSION/encodings ]; then
+            echo "OK: encodings module found at /usr/lib/python$PY_VERSION/encodings"
+          else
+            echo "WARN: encodings not found in /usr/lib/python$PY_VERSION, AppImage Python may fail"
+          fi
+          echo "Bundled Python stdlib size:"
+          du -sh install.dir/usr/lib/python$PY_VERSION
+
       - name: Create AppImage using linuxdeploy
         run: |
           wget -c "https://github.com/linuxdeploy/linuxdeploy/releases/download/${{ env.LINUXDEPLOY_VERSION }}/linuxdeploy-x86_64.AppImage"
