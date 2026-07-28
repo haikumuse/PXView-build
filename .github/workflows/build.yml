@@ -247,15 +247,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macos-14 = Apple Silicon (M1) runner, 原生编译 ARM64
-          - runner: macos-14
-            arch: ARM64
-          # macos-13 = Intel runner, 原生编译 x86_64
-          # （macos-14/15 是 ARM 机器，无法原生编译 x86_64，
-          #   跨编译需要 x86_64 版 Homebrew 库，过于复杂，用 macos-13 更可靠）
-          - runner: macos-13
-            arch: x86_64
-    runs-on: ${{ matrix.runner }}
+          # ARM64: 原生编译，直接在 Apple Silicon (M1) runner 上构建
+          - arch: ARM64
+            cross_compile: false
+          # x86_64: 在 ARM64 runner 上通过 Rosetta 2 交叉编译
+          # GitHub 已下线 macos-13 (Intel) runner，macos-14/15 全部是 ARM64。
+          # 方案：安装 x86_64 Homebrew (/usr/local) + Rosetta 2，
+          #       整个工具链 (cmake/ninja/clang/Qt) 以 x86_64 模式运行，
+          #       效果等同于在 Intel Mac 上原生编译。
+          - arch: x86_64
+            cross_compile: true
+    runs-on: macos-14
     steps:
       - name: Resolve ref
         id: ref
@@ -275,10 +277,32 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
+      - name: Setup x86_64 cross-compilation (Rosetta 2)
+        if: matrix.cross_compile
+        run: |
+          # 安装 Rosetta 2（macos-14 是 ARM64，需要 Rosetta 运行 x86_64 二进制）
+          softwareupdate --install-rosetta --agree-to-license || true
+
+          # 安装 x86_64 Homebrew 到 /usr/local
+          # ARM64 Homebrew 在 /opt/homebrew，x86_64 Homebrew 在 /usr/local，互不冲突
+          if [ ! -f /usr/local/bin/brew ]; then
+            NONINTERACTIVE=1 arch -x86_64 /bin/bash -c \
+              "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          fi
+
+          # 将 x86_64 Homebrew 的 bin 目录添加到 PATH 最前面
+          # 这样 brew/cmake/ninja/qt 等工具都会使用 x86_64 版本（通过 Rosetta 2 运行）
+          echo "/usr/local/bin" >> $GITHUB_PATH
+
+          echo "=== x86_64 Homebrew ==="
+          /usr/local/bin/brew --version
+          echo "BREW_PREFIX=$(/usr/local/bin/brew --prefix)"
+
       - name: Install dependencies via Homebrew
         run: |
           brew update
           # sdcc: 编译 fx2lafw 固件（Cypress FX2 USB 芯片，老款逻辑分析仪用）
+          # x86_64 构建时，brew/cmake/ninja 等通过 PATH 自动解析到 /usr/local/bin 下的 x86_64 版本
           brew install cmake ninja gettext glib libusb zlib boost fftw python3 qt pkg-config libzip nettle libftdi sdcc
 
       - name: Setup Node.js (for Web UI)
@@ -316,7 +340,7 @@ jobs:
           # Python framework 路径修正：
           # Homebrew python@3.x 把 framework 放在 <prefix>/Frameworks/Python.framework，
           # 但 macdeployqt 期望在 <prefix>/lib/Python.framework。
-          # 不同 runner 上 Python 版本可能不同（macos-14 可能是 3.14，macos-13 可能是 3.13），
+          # ARM64 和 x86_64 Homebrew 的 Python 版本可能不同（各自独立安装），
           # 所以用 python3 别名（Homebrew 会自动解析到实际版本）。
           PY_PREFIX="$(brew --prefix python3 2>/dev/null \
                        || brew --prefix python@3.14 2>/dev/null \
@@ -431,7 +455,13 @@ jobs:
           echo ""
           echo "启动 PXView --headless,等待 15 秒..."
 
-          "$APP_BIN" --headless -l 4 > /tmp/pxv-headless.log 2>&1 &
+          if [ "${{ matrix.cross_compile }}" = "true" ]; then
+            echo "运行模式: x86_64 (via Rosetta 2 on ARM64 runner)"
+            arch -x86_64 "$APP_BIN" --headless -l 4 > /tmp/pxv-headless.log 2>&1 &
+          else
+            echo "运行模式: ARM64 (native)"
+            "$APP_BIN" --headless -l 4 > /tmp/pxv-headless.log 2>&1 &
+          fi
           PID=$!
           sleep 15
 
