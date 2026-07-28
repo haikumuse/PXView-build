@@ -290,19 +290,36 @@ jobs:
               "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
           fi
 
+          # ── 环境变量（通过 GITHUB_ENV 传递给后续所有步骤）──
+          # HOMEBREW_NO_PATH_SHADOW_CHECK: ARM64 Homebrew (/opt/homebrew/bin) 的同名
+          #   命令会 shadow x86_64 Homebrew 的命令，导致 brew install 报错 exit 1。
+          #   设为 1 跳过此检查。
+          echo "HOMEBREW_NO_PATH_SHADOW_CHECK=1" >> $GITHUB_ENV
+          echo "HOMEBREW_NO_ENV_HINTS=1" >> $GITHUB_ENV
+          echo "HOMEBREW_NO_AUTO_UPDATE=1" >> $GITHUB_ENV
+
           # 将 x86_64 Homebrew 的 bin 目录添加到 PATH 最前面
-          # 这样 brew/cmake/ninja/qt 等工具都会使用 x86_64 版本（通过 Rosetta 2 运行）
+          # GITHUB_PATH 会在后续步骤的 PATH 开头插入此路径
+          # 这样 brew/cmake/ninja/qt 等命令自动解析到 /usr/local/bin 下的 x86_64 版本
           echo "/usr/local/bin" >> $GITHUB_PATH
 
-          echo "=== x86_64 Homebrew ==="
+          # 验证 brew 二进制是 x86_64 架构
+          echo "=== x86_64 Homebrew 验证 ==="
           /usr/local/bin/brew --version
+          BREW_CORE="/usr/local/Homebrew/bin/brew"
+          if [ -f "$BREW_CORE" ]; then
+            echo "brew binary 架构:"
+            file "$BREW_CORE"
+            lipo -info "$BREW_CORE" 2>/dev/null || true
+          fi
           echo "BREW_PREFIX=$(/usr/local/bin/brew --prefix)"
 
       - name: Install dependencies via Homebrew
         run: |
+          # x86_64 构建时，/usr/local/bin 已通过 GITHUB_PATH 添加到 PATH 最前面，
+          # brew 命令自动解析到 /usr/local/bin/brew (x86_64 版本，通过 Rosetta 2 运行)
           brew update
           # sdcc: 编译 fx2lafw 固件（Cypress FX2 USB 芯片，老款逻辑分析仪用）
-          # x86_64 构建时，brew/cmake/ninja 等通过 PATH 自动解析到 /usr/local/bin 下的 x86_64 版本
           brew install cmake ninja gettext glib libusb zlib boost fftw python3 qt pkg-config libzip nettle libftdi sdcc
 
       - name: Setup Node.js (for Web UI)
@@ -323,7 +340,21 @@ jobs:
           export LDFLAGS="-L$(brew --prefix gettext)/lib"
           export CPPFLAGS="-I$(brew --prefix gettext)/include"
           export PKG_CONFIG_PATH="$(brew --prefix gettext)/lib/pkgconfig:$PKG_CONFIG_PATH"
+
+          # x86_64 交叉编译：在 ARM64 Mac 上用 x86_64 Homebrew 库编译 x86_64 二进制。
+          # 系统 clang (universal binary) 默认编译 ARM64 (host arch)，
+          # 但 x86_64 Homebrew 的库是 x86_64 的，必须用 CMAKE_OSX_ARCHITECTURES=x86_64
+          # 让 clang 编译 x86_64 代码，否则 ARM64 object 文件链接 x86_64 库会失败。
+          if [ "${{ matrix.cross_compile }}" = "true" ]; then
+            OSX_ARCH_FLAG="-DCMAKE_OSX_ARCHITECTURES=x86_64"
+            echo "配置: x86_64 交叉编译 (Rosetta 2)"
+          else
+            OSX_ARCH_FLAG=""
+            echo "配置: ARM64 原生编译"
+          fi
+
           cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            $OSX_ARCH_FLAG \
             -DCMAKE_PREFIX_PATH="$(brew --prefix qt)" \
             -DCMAKE_INSTALL_PREFIX=../install.dir
 
