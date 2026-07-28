@@ -386,6 +386,92 @@ jobs:
             -ov -format UDZO install.dir/PXView.dmg
           ls -la install.dir/*.dmg
 
+      - name: Verify DMG (headless launch test)
+        run: |
+          set -e
+
+          # ── 挂载 DMG 并提取 .app 到可写临时目录 ──
+          # 直接从 DMG 运行是只读的,可能导致 codesign/rpath 验证异常,先提取出来。
+          hdiutil attach install.dir/PXView.dmg -nobrowse -mountpoint /tmp/vrf-mount
+          rm -rf /tmp/PXView-vrf.app
+          cp -R /tmp/vrf-mount/PXView.app /tmp/PXView-vrf.app
+          hdiutil detach /tmp/vrf-mount
+          xattr -cr /tmp/PXView-vrf.app
+
+          APP_BIN="/tmp/PXView-vrf.app/Contents/MacOS/PXView"
+          FW="/tmp/PXView-vrf.app/Contents/Frameworks"
+
+          echo "=== 1. 二进制架构 ==="
+          file "$APP_BIN"
+          lipo -info "$APP_BIN" 2>/dev/null || true
+
+          echo ""
+          echo "=== 2. @rpath 依赖检查(主二进制) ==="
+          MISS=0
+          while IFS= read -r ln; do
+            lib=$(echo "$ln" | sed 's/^[[:space:]]*//' | awk '{print $1}')
+            nm="${lib#@rpath/}"
+            if [ ! -f "$FW/$nm" ]; then
+              echo "  缺失: $lib"
+              MISS=$((MISS+1))
+            fi
+          done < <(otool -L "$APP_BIN" | grep '@rpath/')
+          if [ "$MISS" -gt 0 ]; then
+            echo "错误: $MISS 个 @rpath 依赖未在 Frameworks 中找到"
+            exit 1
+          fi
+          echo "  主二进制所有 @rpath 依赖已解析"
+
+          echo ""
+          echo "=== 3. headless 启动测试 ==="
+          echo "PXView --headless 模式使用 QCoreApplication(无需 GUI),"
+          echo "但仍会加载 libsigrok、libsigrokdecode、Python framework、"
+          echo "所有协议解码器,并启动 MCP(10110)/WS(10430) API 服务。"
+          echo "如果任何 dylib 缺失或损坏,进程会立即崩溃。"
+          echo ""
+          echo "启动 PXView --headless,等待 15 秒..."
+
+          "$APP_BIN" --headless -l 4 > /tmp/pxv-headless.log 2>&1 &
+          PID=$!
+          sleep 15
+
+          if kill -0 "$PID" 2>/dev/null; then
+            echo "通过: 进程存活 15 秒 — 所有库加载成功"
+            # 检查 API 端口是否在监听
+            if lsof -iTCP:10110 -sTCP:LISTEN -P 2>/dev/null | grep -q LISTEN; then
+              echo "通过: MCP 端口 10110 正在监听"
+            else
+              echo "警告: MCP 端口 10110 未监听(可能仍在初始化)"
+            fi
+            if lsof -iTCP:10430 -sTCP:LISTEN -P 2>/dev/null | grep -q LISTEN; then
+              echo "通过: WebSocket 端口 10430 正在监听"
+            else
+              echo "警告: WS 端口 10430 未监听(可能仍在初始化)"
+            fi
+            # 打印前 20 行输出用于诊断
+            echo ""
+            echo "=== 应用输出(前 20 行) ==="
+            head -20 /tmp/pxv-headless.log 2>/dev/null || true
+            kill "$PID" 2>/dev/null || true
+            wait "$PID" 2>/dev/null || true
+          else
+            echo "失败: 进程在 15 秒内退出"
+            EXIT_CODE=0
+            wait "$PID" 2>/dev/null || EXIT_CODE=$?
+            echo "退出码: $EXIT_CODE"
+            echo ""
+            echo "=== 应用输出日志 ==="
+            cat /tmp/pxv-headless.log 2>/dev/null || true
+            echo ""
+            echo "=== 崩溃报告 ==="
+            ls -lt ~/Library/Logs/DiagnosticReports/PXView* 2>/dev/null | head -5 || echo "未找到崩溃日志"
+            cat ~/Library/Logs/DiagnosticReports/PXView*.crash 2>/dev/null | head -80 || true
+            exit 1
+          fi
+
+          echo ""
+          echo "=== ✅ DMG 验证通过 (${{ matrix.arch }}) ==="
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -472,6 +558,74 @@ jobs:
           hdiutil create -volname PXView -srcfolder universal/PXView.app \
             -ov -format UDZO universal/PXView.dmg
           ls -la universal/*.dmg
+
+      - name: Verify Universal DMG (headless launch test)
+        run: |
+          set -e
+
+          # ── 挂载 Universal DMG 并提取 .app ──
+          hdiutil attach universal/PXView.dmg -nobrowse -mountpoint /tmp/vrf-uni-mount
+          rm -rf /tmp/PXView-uni-vrf.app
+          cp -R /tmp/vrf-uni-mount/PXView.app /tmp/PXView-uni-vrf.app
+          hdiutil detach /tmp/vrf-uni-mount
+          xattr -cr /tmp/PXView-uni-vrf.app
+
+          APP_BIN="/tmp/PXView-uni-vrf.app/Contents/MacOS/PXView"
+
+          echo "=== 1. 二进制架构验证 ==="
+          file "$APP_BIN"
+          lipo -info "$APP_BIN"
+          ARCHS=$(lipo -archs "$APP_BIN" 2>/dev/null)
+          echo "包含架构: $ARCHS"
+          if echo "$ARCHS" | grep -q "x86_64" && echo "$ARCHS" | grep -q "arm64"; then
+            echo "通过: Universal 二进制包含 arm64 + x86_64"
+          else
+            echo "失败: 不是 Universal 二进制"
+            exit 1
+          fi
+
+          echo ""
+          echo "=== 2. headless 启动测试 (ARM64 slice) ==="
+          echo "在 ARM64 runner 上运行 Universal 二进制(自动选择 arm64 slice)..."
+          echo ""
+          "$APP_BIN" --headless -l 4 > /tmp/pxv-uni-headless.log 2>&1 &
+          PID=$!
+          sleep 15
+
+          if kill -0 "$PID" 2>/dev/null; then
+            echo "通过: 进程存活 15 秒 — 所有库加载成功"
+            if lsof -iTCP:10110 -sTCP:LISTEN -P 2>/dev/null | grep -q LISTEN; then
+              echo "通过: MCP 端口 10110 正在监听"
+            else
+              echo "警告: MCP 端口 10110 未监听"
+            fi
+            if lsof -iTCP:10430 -sTCP:LISTEN -P 2>/dev/null | grep -q LISTEN; then
+              echo "通过: WebSocket 端口 10430 正在监听"
+            else
+              echo "警告: WS 端口 10430 未监听"
+            fi
+            echo ""
+            echo "=== 应用输出(前 20 行) ==="
+            head -20 /tmp/pxv-uni-headless.log 2>/dev/null || true
+            kill "$PID" 2>/dev/null || true
+            wait "$PID" 2>/dev/null || true
+          else
+            echo "失败: 进程在 15 秒内退出"
+            EXIT_CODE=0
+            wait "$PID" 2>/dev/null || EXIT_CODE=$?
+            echo "退出码: $EXIT_CODE"
+            echo ""
+            echo "=== 应用输出日志 ==="
+            cat /tmp/pxv-uni-headless.log 2>/dev/null || true
+            echo ""
+            echo "=== 崩溃报告 ==="
+            ls -lt ~/Library/Logs/DiagnosticReports/PXView* 2>/dev/null | head -5 || echo "未找到崩溃日志"
+            cat ~/Library/Logs/DiagnosticReports/PXView*.crash 2>/dev/null | head -80 || true
+            exit 1
+          fi
+
+          echo ""
+          echo "=== ✅ Universal DMG 验证通过 ==="
 
       - name: Upload Universal Artifact
         uses: actions/upload-artifact@v4
