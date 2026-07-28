@@ -502,6 +502,82 @@ jobs:
           echo ""
           echo "=== ✅ DMG 验证通过 (${{ matrix.arch }}) ==="
 
+      - name: Verify GUI mode (offscreen platform)
+        run: |
+          set -e
+          APP_BIN="/tmp/PXView-vrf.app/Contents/MacOS/PXView"
+
+          echo "=== 4. GUI 模式启动测试 (offscreen) ==="
+          echo "使用 QT_QPA_PLATFORM=offscreen 在无显示器环境测试 GUI 代码路径。"
+          echo "这会创建 QApplication(触发 NSApplication)、构造 MainFrame/MainWindow、"
+          echo "加载主题/字体/解码器,但不实际渲染窗口。"
+          echo "如果 GUI 代码路径有任何崩溃(如 Python init 与 NSApplication 冲突),"
+          echo "进程会立即退出。"
+          echo ""
+          echo "启动 PXView (offscreen),等待 15 秒..."
+
+          # 使用 offscreen 平台插件,让 QApplication 在无显示器环境下运行
+          # 这样可以测试 GUI 代码路径(MainFrame/MainWindow 构造)而不需要真实显示器
+          export QT_QPA_PLATFORM=offscreen
+          if [ "${{ matrix.cross_compile }}" = "true" ]; then
+            arch -x86_64 "$APP_BIN" -l 4 > /tmp/pxv-gui.log 2>&1 &
+          else
+            "$APP_BIN" -l 4 > /tmp/pxv-gui.log 2>&1 &
+          fi
+          GUI_PID=$!
+          sleep 15
+
+          if kill -0 "$GUI_PID" 2>/dev/null; then
+            echo "通过: GUI 进程存活 15 秒 — GUI 代码路径正常"
+
+            # 检查关键日志是否出现
+            if grep -q "DBG: control->Init() done" /tmp/pxv-gui.log; then
+              echo "通过: control->Init() 完成"
+            else
+              echo "警告: control->Init() 日志未找到(可能在 Init 中卡住)"
+            fi
+
+            if grep -q "DBG: MainFrame constructed" /tmp/pxv-gui.log; then
+              echo "通过: MainFrame 构造完成"
+            else
+              echo "警告: MainFrame 构造日志未找到(可能在构造中崩溃)"
+            fi
+
+            if grep -q "DBG: control->Start() done" /tmp/pxv-gui.log; then
+              echo "通过: control->Start() 完成"
+            else
+              echo "警告: control->Start() 日志未找到"
+            fi
+
+            # 打印关键诊断日志
+            echo ""
+            echo "=== GUI 模式诊断日志 (DBG 行) ==="
+            grep "DBG:" /tmp/pxv-gui.log 2>/dev/null || echo "(无 DBG 日志)"
+
+            echo ""
+            echo "=== GUI 模式输出 (最后 30 行) ==="
+            tail -30 /tmp/pxv-gui.log 2>/dev/null || true
+
+            kill "$GUI_PID" 2>/dev/null || true
+            wait "$GUI_PID" 2>/dev/null || true
+          else
+            echo "失败: GUI 进程在 15 秒内退出"
+            GUI_EXIT=0
+            wait "$GUI_PID" 2>/dev/null || GUI_EXIT=$?
+            echo "退出码: $GUI_EXIT"
+            echo ""
+            echo "=== GUI 模式输出日志 ==="
+            cat /tmp/pxv-gui.log 2>/dev/null || true
+            echo ""
+            echo "=== 崩溃报告 ==="
+            ls -lt ~/Library/Logs/DiagnosticReports/PXView* 2>/dev/null | head -5 || echo "未找到崩溃日志"
+            cat ~/Library/Logs/DiagnosticReports/PXView*.crash 2>/dev/null | head -100 || true
+            exit 1
+          fi
+
+          echo ""
+          echo "=== ✅ GUI 模式验证通过 (${{ matrix.arch }}) ==="
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
