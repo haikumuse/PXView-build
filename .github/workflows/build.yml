@@ -320,7 +320,16 @@ jobs:
           # brew 命令自动解析到 /usr/local/bin/brew (x86_64 版本，通过 Rosetta 2 运行)
           brew update
           # sdcc: 编译 fx2lafw 固件（Cypress FX2 USB 芯片，老款逻辑分析仪用）
-          brew install cmake ninja gettext glib libusb zlib boost fftw python3 qt pkg-config libzip nettle libftdi sdcc
+          # --overwrite: x86_64 Homebrew 安装 python@3.14 时 brew link 失败，
+          #   因为 runner 预装了 /usr/local/bin/idle3 等文件（macOS 系统自带或
+          #   GitHub runner 预装），与 python@3.14 的符号链接冲突。
+          #   --overwrite 强制覆盖所有冲突文件。
+          if [ "${{ matrix.cross_compile }}" = "true" ]; then
+            BREW_OVERWRITE="--overwrite"
+          else
+            BREW_OVERWRITE=""
+          fi
+          brew install $BREW_OVERWRITE cmake ninja gettext glib libusb zlib boost fftw python3 qt pkg-config libzip nettle libftdi sdcc
 
       - name: Setup Node.js (for Web UI)
         uses: actions/setup-node@v4
