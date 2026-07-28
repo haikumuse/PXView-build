@@ -547,6 +547,20 @@ jobs:
           set -e
           APP_BIN="/tmp/PXView-vrf.app/Contents/MacOS/PXView"
 
+          # macdeployqt 只打包 cocoa 平台插件,offscreen 插件需要手动复制。
+          # offscreen 插件用于在无显示器环境下测试 GUI 代码路径。
+          QT_PLUGINS="/tmp/PXView-vrf.app/Contents/PlugIns/platforms"
+          OFFSCREEN_SRC="$(brew --prefix qt)/plugins/platforms/libqoffscreen.dylib"
+          if [ -f "$OFFSCREEN_SRC" ]; then
+            mkdir -p "$QT_PLUGINS"
+            cp -f "$OFFSCREEN_SRC" "$QT_PLUGINS/"
+            echo "已复制 offscreen 平台插件"
+          else
+            echo "警告: offscreen 插件未找到于 $OFFSCREEN_SRC"
+            echo "可用平台插件:"
+            ls -la "$(brew --prefix qt)/plugins/platforms/" 2>/dev/null || true
+          fi
+
           echo "=== 4. GUI 模式启动测试 (offscreen) ==="
           echo "使用 QT_QPA_PLATFORM=offscreen 在无显示器环境测试 GUI 代码路径。"
           echo "这会创建 QApplication(触发 NSApplication)、构造 MainFrame/MainWindow、"
