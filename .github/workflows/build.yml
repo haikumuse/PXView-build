@@ -241,9 +241,21 @@ jobs:
           if-no-files-found: error
 
   mac:
-    name: macOS DMG (ARM64)
+    name: macOS (${{ matrix.arch }})
     if: ${{ github.event.inputs.targets == 'mac' || github.event.inputs.targets == 'both' || github.event.action == 'build' }}
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-14 = Apple Silicon (M1) runner, 原生编译 ARM64
+          - runner: macos-14
+            arch: ARM64
+          # macos-13 = Intel runner, 原生编译 x86_64
+          # （macos-14/15 是 ARM 机器，无法原生编译 x86_64，
+          #   跨编译需要 x86_64 版 Homebrew 库，过于复杂，用 macos-13 更可靠）
+          - runner: macos-13
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Resolve ref
         id: ref
@@ -300,11 +312,23 @@ jobs:
       - name: Create DMG using macdeployqt
         run: |
           MACDEPLOYQT="$(brew --prefix qt)/bin/macdeployqt"
-          PY_PREFIX="$(brew --prefix python@3.14)"
-          mkdir -p "$PY_PREFIX/lib"
-          if [ ! -e "$PY_PREFIX/lib/Python.framework" ] && [ -e "$PY_PREFIX/Frameworks/Python.framework" ]; then
-            ln -s "$PY_PREFIX/Frameworks/Python.framework" "$PY_PREFIX/lib/Python.framework"
+
+          # Python framework 路径修正：
+          # Homebrew python@3.x 把 framework 放在 <prefix>/Frameworks/Python.framework，
+          # 但 macdeployqt 期望在 <prefix>/lib/Python.framework。
+          # 不同 runner 上 Python 版本可能不同（macos-14 可能是 3.14，macos-13 可能是 3.13），
+          # 所以用 python3 别名（Homebrew 会自动解析到实际版本）。
+          PY_PREFIX="$(brew --prefix python3 2>/dev/null \
+                       || brew --prefix python@3.14 2>/dev/null \
+                       || brew --prefix python@3.13 2>/dev/null \
+                       || brew --prefix python@3.12 2>/dev/null)"
+          if [ -n "$PY_PREFIX" ]; then
+            mkdir -p "$PY_PREFIX/lib"
+            if [ ! -e "$PY_PREFIX/lib/Python.framework" ] && [ -e "$PY_PREFIX/Frameworks/Python.framework" ]; then
+              ln -s "$PY_PREFIX/Frameworks/Python.framework" "$PY_PREFIX/lib/Python.framework"
+            fi
           fi
+
           # macdeployqt 只做依赖收集，不传 -codesign=-。
           # 旧版 -codesign=- 只签主二进制和 Qt 框架，但被复制进 Frameworks 的
           # 非 Qt 传递依赖（libbrotlicommon/libsharpyuv/libwebp）未签名
@@ -365,6 +389,93 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PXView-macOS-ARM64-${{ steps.ref.outputs.value }}
+          name: PXView-macOS-${{ matrix.arch }}-${{ steps.ref.outputs.value }}
           path: install.dir/*.dmg
+          if-no-files-found: error
+
+  mac-universal:
+    name: macOS Universal DMG (ARM64 + x86_64)
+    needs: mac
+    runs-on: macos-14
+    steps:
+      - name: Resolve ref
+        id: ref
+        run: |
+          if [ -n "${{ github.event.inputs.ref }}" ]; then
+            echo "value=${{ github.event.inputs.ref }}" >> $GITHUB_OUTPUT
+          else
+            echo "value=${{ github.event.client_payload.ref }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download ARM64 build
+        uses: actions/download-artifact@v4
+        with:
+          name: PXView-macOS-ARM64-${{ steps.ref.outputs.value }}
+          path: arm64-dl
+
+      - name: Download x86_64 build
+        uses: actions/download-artifact@v4
+        with:
+          name: PXView-macOS-x86_64-${{ steps.ref.outputs.value }}
+          path: x86_64-dl
+
+      - name: Mount DMGs and extract apps
+        run: |
+          mkdir -p arm64 x86_64 universal
+          # 挂载 ARM64 DMG 并提取 PXView.app
+          hdiutil attach arm64-dl/*.dmg -nobrowse -mountpoint /tmp/arm64-mount
+          cp -R /tmp/arm64-mount/PXView.app arm64/PXView.app
+          hdiutil detach /tmp/arm64-mount
+          # 挂载 x86_64 DMG 并提取 PXView.app
+          hdiutil attach x86_64-dl/*.dmg -nobrowse -mountpoint /tmp/x86_64-mount
+          cp -R /tmp/x86_64-mount/PXView.app x86_64/PXView.app
+          hdiutil detach /tmp/x86_64-mount
+
+      - name: Create universal binary with lipo
+        run: |
+          # 以 ARM64 app 为基础复制，然后逐个合并 x86_64 的 Mach-O 二进制
+          cp -R arm64/PXView.app universal/PXView.app
+
+          # 遍历 x86_64 app 中的所有文件，找出 Mach-O 二进制并用 lipo 合并
+          find x86_64/PXView.app -type f | while read -r x86_file; do
+              rel="${x86_file#x86_64/PXView.app/}"
+              arm_file="arm64/PXView.app/$rel"
+              uni_file="universal/PXView.app/$rel"
+
+              # ARM64 版本不存在则跳过（保留 ARM64 基础中的文件）
+              [ -f "$arm_file" ] || continue
+
+              # 只对双方都是 Mach-O 的文件做 lipo 合并
+              if file "$x86_file" | grep -q "Mach-O" && file "$arm_file" | grep -q "Mach-O"; then
+                  echo "Combining: $rel"
+                  lipo -create "$arm_file" "$x86_file" -output "$uni_file" \
+                    || echo "WARN: Failed to combine $rel, keeping ARM64 version"
+              fi
+          done
+
+          echo "=== Universal binary verification ==="
+          file universal/PXView.app/Contents/MacOS/PXView
+          lipo -info universal/PXView.app/Contents/MacOS/PXView
+
+      - name: Re-sign and create universal DMG
+        run: |
+          # 清除可能的隔离标记
+          xattr -cr universal/PXView.app
+          # 重新递归签名（lipo 合并后签名失效，需要重新签）
+          codesign --force --deep --sign - universal/PXView.app
+          # 验证签名
+          if ! codesign --verify --deep --strict universal/PXView.app 2>&1; then
+            echo "ERROR: codesign verification failed for universal app"
+            exit 1
+          fi
+          # 生成 Universal DMG
+          hdiutil create -volname PXView -srcfolder universal/PXView.app \
+            -ov -format UDZO universal/PXView.dmg
+          ls -la universal/*.dmg
+
+      - name: Upload Universal Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PXView-macOS-Universal-${{ steps.ref.outputs.value }}
+          path: universal/*.dmg
           if-no-files-found: error
