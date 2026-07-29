@@ -439,14 +439,28 @@ jobs:
             for ver_dir in "$BUNDLED_FW"/Versions/3.*; do
               [ -d "$ver_dir" ] || continue
               py_ver=$(basename "$ver_dir")
-              # 从 Homebrew 查找 stdlib (可能在 brew prefix 或 PY_PREFIX 下)
+              # macOS Homebrew: stdlib 在 Python.framework 内部
+              #   <prefix>/Frameworks/Python.framework/Versions/3.X/lib/python3.X/
+              # 也可能在 PY_PREFIX/lib/Python.framework (前面创建的符号链接)
               STDLIB_SRC=""
-              for candidate in "$(brew --prefix)/lib/python$py_ver" "$PY_PREFIX/lib/python$py_ver"; do
-                if [ -d "$candidate/encodings" ]; then
-                  STDLIB_SRC="$candidate"
+              for fw_base in \
+                "$PY_PREFIX/Frameworks/Python.framework" \
+                "$PY_PREFIX/lib/Python.framework" \
+                "$(brew --prefix)/Frameworks/Python.framework"; do
+                if [ -d "$fw_base/Versions/$py_ver/lib/python$py_ver/encodings" ]; then
+                  STDLIB_SRC="$fw_base/Versions/$py_ver/lib/python$py_ver"
                   break
                 fi
               done
+              # 也检查 brew prefix/lib (非 framework 安装方式)
+              if [ -z "$STDLIB_SRC" ]; then
+                for candidate in "$(brew --prefix)/lib/python$py_ver" "$PY_PREFIX/lib/python$py_ver"; do
+                  if [ -d "$candidate/encodings" ]; then
+                    STDLIB_SRC="$candidate"
+                    break
+                  fi
+                done
+              fi
               if [ -n "$STDLIB_SRC" ]; then
                 mkdir -p "$ver_dir/lib"
                 cp -R "$STDLIB_SRC" "$ver_dir/lib/"
