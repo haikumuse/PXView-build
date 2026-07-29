@@ -399,9 +399,12 @@ jobs:
           # 非 Qt 传递依赖（libbrotlicommon/libsharpyuv/libwebp）未签名
           # → codesign --verify 失败 → Gatekeeper 报"已损坏"。
           # 签名由后续步骤显式控制，dmg 由最后 hdiutil 生成（保证签后内容一致）。
+          echo "=== macdeployqt (依赖收集) ==="
+          SECS_START=$SECONDS
           $MACDEPLOYQT install.dir/PXView.app \
             -always-overwrite -verbose=1 \
             || true   # macdeployqt 对找不到的 rpath 返回非零，但已复制大部分依赖
+          echo "macdeployqt 耗时: $((SECONDS - SECS_START))s"
 
           # 预先从 Homebrew 复制 macdeployqt 报错说找不到的三个 dylib
           # （Qt WebEngine/Pdf 的传递依赖，PXView 没直接用，但 macdeployqt 会扫描到）
@@ -423,6 +426,52 @@ jobs:
             fi
           done
 
+          # ── 复制 Python 标准库到 bundled Python.framework ──
+          # macdeployqt 只复制 framework 的 Mach-O 二进制 (Python 共享库),
+          # 不复制 lib/python3.X/ 目录 (含 encodings, os.py 等纯 Python 模块)。
+          # Homebrew 的 stdlib 在 $(brew --prefix)/lib/python3.X/, 不在 framework 内。
+          # 不复制会导致 "ModuleNotFoundError: No module named 'encodings'" 崩溃。
+          # CI headless 测试会假阳性通过 (runner 上有 Homebrew Python, app 回退到
+          # system Python),但终端用户机器上没有 Homebrew Python 会立即崩溃。
+          echo "=== 复制 Python stdlib ==="
+          BUNDLED_FW="install.dir/PXView.app/Contents/Frameworks/Python.framework"
+          if [ -d "$BUNDLED_FW" ]; then
+            for ver_dir in "$BUNDLED_FW"/Versions/3.*; do
+              [ -d "$ver_dir" ] || continue
+              py_ver=$(basename "$ver_dir")
+              # 从 Homebrew 查找 stdlib (可能在 brew prefix 或 PY_PREFIX 下)
+              STDLIB_SRC=""
+              for candidate in "$(brew --prefix)/lib/python$py_ver" "$PY_PREFIX/lib/python$py_ver"; do
+                if [ -d "$candidate/encodings" ]; then
+                  STDLIB_SRC="$candidate"
+                  break
+                fi
+              done
+              if [ -n "$STDLIB_SRC" ]; then
+                mkdir -p "$ver_dir/lib"
+                cp -R "$STDLIB_SRC" "$ver_dir/lib/"
+                echo "Copied Python stdlib (python$py_ver from $STDLIB_SRC) to bundled framework"
+                if [ -d "$ver_dir/lib/python$py_ver/encodings" ]; then
+                  echo "Verified: encodings module present"
+                else
+                  echo "WARNING: encodings module missing after copy"
+                fi
+              else
+                echo "WARNING: Python stdlib not found for $py_ver"
+              fi
+            done
+            # 创建 Current 符号链接 (macdeployqt 可能不复制)
+            if [ ! -e "$BUNDLED_FW/Versions/Current" ]; then
+              latest_ver=$(ls -d "$BUNDLED_FW"/Versions/3.* 2>/dev/null | sort -V | tail -1)
+              if [ -n "$latest_ver" ]; then
+                ln -s "$(basename "$latest_ver")" "$BUNDLED_FW/Versions/Current"
+                echo "Created Current symlink -> $(basename "$latest_ver")"
+              fi
+            fi
+          else
+            echo "WARNING: Python.framework not found in bundle"
+          fi
+
           # 清除 Homebrew/缓存下载的库可能带的隔离标记
           xattr -cr install.dir/PXView.app
 
@@ -433,7 +482,10 @@ jobs:
           # --deep 虽被 Apple 标记 deprecated（对分发签名而言），
           # 但对 CI 的 ad-hoc 签名是正确工具：它按从内到外顺序递归签名。
           # --force 覆盖所有可能失效的旧签名。
+          echo "=== codesign (递归签名) ==="
+          SECS_CS=$SECONDS
           codesign --force --deep --sign - install.dir/PXView.app
+          echo "codesign 耗时: $((SECONDS - SECS_CS))s"
 
           # 验证签名，失败则构建失败并打印诊断信息
           if ! codesign --verify --deep --strict install.dir/PXView.app 2>&1; then
@@ -447,8 +499,11 @@ jobs:
           fi
 
           # 签名完成后生成 dmg
+          echo "=== hdiutil (DMG 生成) ==="
+          SECS_HD=$SECONDS
           hdiutil create -volname PXView -srcfolder install.dir/PXView.app \
             -ov -format UDZO install.dir/PXView.dmg
+          echo "hdiutil 耗时: $((SECONDS - SECS_HD))s"
           ls -la install.dir/*.dmg
 
       - name: Verify DMG (headless launch test)
@@ -488,7 +543,35 @@ jobs:
           echo "  主二进制所有 @rpath 依赖已解析"
 
           echo ""
-          echo "=== 3. headless 启动测试 ==="
+          echo "=== 3. Python stdlib 检查 ==="
+          # CI runner 上有 Homebrew Python,headless 测试即使没有打包 stdlib 也能通过
+          # (app 回退到 system Python)。但终端用户机器上没有 Homebrew Python 会崩溃。
+          # 所以必须验证 stdlib 确实打包在 .app 内。
+          PY_FW="$FW/Python.framework"
+          if [ -d "$PY_FW" ]; then
+            found_stdlib=false
+            for ver_dir in "$PY_FW"/Versions/3.*; do
+              [ -d "$ver_dir" ] || continue
+              py_ver=$(basename "$ver_dir")
+              if [ -d "$ver_dir/lib/python$py_ver/encodings" ]; then
+                found_stdlib=true
+                echo "通过: Python stdlib (python$py_ver) 已打包, encodings 模块存在"
+                break
+              fi
+            done
+            if [ "$found_stdlib" = false ]; then
+              echo "错误: Python.framework 存在但 stdlib 缺失"
+              echo "应用在无 Homebrew Python 的机器上会崩溃"
+              echo "=== Python.framework 目录结构 ==="
+              find "$PY_FW" -maxdepth 4 -type d 2>/dev/null | head -30
+              exit 1
+            fi
+          else
+            echo "警告: 未找到 Python.framework (可能使用系统 Python)"
+          fi
+
+          echo ""
+          echo "=== 4. headless 启动测试 ==="
           echo "PXView --headless 模式使用 QCoreApplication(无需 GUI),"
           echo "但仍会加载 libsigrok、libsigrokdecode、Python framework、"
           echo "所有协议解码器,并启动 MCP(10110)/WS(10430) API 服务。"
