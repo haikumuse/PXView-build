@@ -474,6 +474,9 @@ jobs:
                 echo "WARNING: Python stdlib not found for $py_ver"
               fi
             done
+            # 删除复制 stdlib 时引入的断链 (如 site-packages 指向 Homebrew 路径)
+            # 断链会导致 xattr -cr 和 codesign --verify 失败
+            find "$BUNDLED_FW" -type l ! -exec test -e {} \; -delete 2>/dev/null || true
             # 创建 Current 符号链接 (macdeployqt 可能不复制)
             if [ ! -e "$BUNDLED_FW/Versions/Current" ]; then
               latest_ver=$(ls -d "$BUNDLED_FW"/Versions/3.* 2>/dev/null | sort -V | tail -1)
@@ -487,7 +490,8 @@ jobs:
           fi
 
           # 清除 Homebrew/缓存下载的库可能带的隔离标记
-          xattr -cr install.dir/PXView.app
+          # || true: 忽略断链导致的非零退出 (已在上面删除断链,但以防万一)
+          xattr -cr install.dir/PXView.app 2>/dev/null || true
 
           # 用 --deep 一次性递归签名整个 .app。
           # 必须用 --deep：framework（如 Python.framework）的资源封印
